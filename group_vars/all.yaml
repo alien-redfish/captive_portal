@@ -1,0 +1,4 @@
+wifi_network_name: Test Network
+wifi_network_password: testingtesting123
+wifi_interface: wlan0
+forwarding_interface: eth0

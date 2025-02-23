@@ -1,0 +1,197 @@
+---
+- hosts: all
+
+  become: true
+
+  tasks:
+    - name: update and upgrade all pkgs
+      ansible.builtin.apt:
+        force_apt_get: yes
+        upgrade: yes
+
+    - name: install Wi-Fi AP dependencies
+      ansible.builtin.apt:
+        name:
+          - hostapd
+          - dnsmasq
+          - iptables
+          - dhcpcd5
+        state: latest
+        update_cache: true
+
+    - name: stop hostapd running
+      ansible.builtin.service:
+        name: hostapd
+        state: stopped
+
+    - name: stop dnsmasq running
+      ansible.builtin.service:
+        name: dnsmasq
+        state: stopped
+
+    - name: check if dhcpcd has already been changed
+      ansible.builtin.lineinfile:
+        line: "static ip_address=192.168.220.1/24"
+        path: /etc/dhcpcd.conf
+      check_mode: true
+      register: dhcpcd_check
+
+    - name: update dhcpcd if required
+      ansible.builtin.blockinfile:
+        state: present
+        dest: /etc/dhcpcd.conf
+        #marker: "<!-- add services ANSIBLE MANAGED BLOCK -->"
+        content: |
+            interface {{wifi_interface}}
+            static ip_address=192.168.220.1/24
+            nohook wpa_supplicant
+      when: dhcpcd_check.changed
+    
+    - name: restart dhcpcd service
+      ansible.builtin.service:
+        name: dhcpcd
+        state: restarted
+    
+    - name: Update hostapd.conf
+      ansible.builtin.copy:
+        dest: /etc/hostapd/hostapd.conf
+        content: |
+          country_code=GB
+          interface={{wifi_interface}}
+          ssid={{wifi_network_name}}
+          hw_mode=a
+          channel=48
+          macaddr_acl=0
+          auth_algs=1
+          ignore_broadcast_ssid=0
+          wpa=2
+          wpa_passphrase={{wifi_network_password}}
+          wpa_key_mgmt=WPA-PSK
+          wpa_pairwise=TKIP
+          rsn_pairwise=CCMP
+    
+    - name: Update hostapd
+      ansible.builtin.replace:
+        path: /etc/default/hostapd
+        regexp: '#DAEMON_CONF=""'
+        replace: 'DAEMON_CONF=/etc/hostapd/hostapd.conf'
+
+    - name: Udate init.d hostapd
+      ansible.builtin.replace:
+        path: /etc/init.d/hostapd  
+        regexp: 'DAEMON_CONF='
+        replace: 'DAEMON_CONF=/etc/hostapd/hostapd.conf'
+
+    - name: rename the dnsmasq.conf file
+      ansible.builtin.copy:
+        remote_src: true
+        src: /etc/dnsmasq.conf
+        dest: /etc/dnsmasq.conf.orig
+    
+    - name: Update dnsmasq.conf
+      ansible.builtin.blockinfile:
+        state: present
+        dest: /etc/dnsmasq.conf
+        content: |
+          interface={{wifi_interface}}
+          server=1.1.1.1
+          dhcp-range=192.168.220.50,192.168.220.150,12h
+    
+    - name: Update sysctl.conf
+      ansible.builtin.replace:
+        path: /etc/sysctl.conf  
+        regexp: '#net.ipv4.ip_forward=1'
+        replace: 'net.ipv4.ip_forward=1'
+    
+    - name: auto run ip forwardingn on reboot
+      ansible.builtin.shell: echo 1 > /proc/sys/net/ipv4/ip_forward
+    
+    - name: Update iptables
+      ansible.builtin.shell: iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+    - name: save iptables update
+      ansible.builtin.shell: iptables-save > /etc/iptables.ipv4.nat
+
+    - name: unmask and enable hostapd
+      ansible.builtin.systemd:
+        name: hostapd
+        state: started
+        enabled: yes
+        masked: no
+
+    - name: start dnsmasq
+      ansible.builtin.service:
+        name: dnsmasq
+        state: started
+
+    - name: install requirements for nodogsplash
+      ansible.builtin.apt:
+        name:
+          - git
+          - libmicrohttpd-dev
+          - build-essential
+        state: latest
+        update_cache: true
+
+    - name: Clone nodogsplash
+      ansible.builtin.git:
+        repo: https://github.com/nodogsplash/nodogsplash.git
+        dest: ~/nodogsplash
+
+    - name: Make nodogsplash
+      ansible.builtin.command: chdir=/root/nodogsplash/ make
+
+    - name: nodogsplash pids
+      community.general.pids:
+        name: nodogsplash
+      register: pids_nodogsplash
+
+    - name: Install nodogsplash
+      ansible.builtin.command: chdir=/root/nodogsplash/ make install
+      when: (pids_nodogsplash["pids"]|length==0)
+
+    - name: check if nodogsplash config has already been changed
+      ansible.builtin.lineinfile:
+        line: "#<!-- add to nodogsplash config ANSIBLE MANAGED BLOCK -->"
+        path: /etc/nodogsplash/nodogsplash.conf
+      check_mode: true
+      register: nds_check
+
+    - name: update /etc/nodogsplash/nodogsplash.conf
+      ansible.builtin.blockinfile:
+        state: present
+        dest: /etc/nodogsplash/nodogsplash.conf
+        marker: "#<!-- add to nodogsplash config ANSIBLE MANAGED BLOCK -->"
+        content: |
+          GatewayInterface wlan0
+          GatewayAddress 192.168.220.1
+          MaxClients 250
+          AuthIdleTimeout 480
+      when: nds_check.changed
+
+    - name: run nodogsplash
+      ansible.builtin.command: nodogsplash
+      when: (pids_nodogsplash["pids"]|length==0)
+
+    - name: check if rc.local has nds
+      ansible.builtin.lineinfile:
+        line: "nodogsplash"
+        path: /etc/rc.local
+      check_mode: true
+      register: nds_rc_local_check
+
+    - name: update /etc/rc.local
+      ansible.builtin.blockinfile:
+        state: present
+        insertbefore: "exit 0"
+        dest: /etc/rc.local
+        #marker: "#<!-- add nds to rc.local ANSIBLE MANAGED BLOCK -->"
+        content: |
+          sudo hostapd /etc/hostapd/hostapd.conf &
+          iptables-restore < /etc/iptables.ipv4.nat
+          nodogsplash
+      when: nds_rc_local_check.changed
+
+    - name: Reboot system
+      ansible.builtin.reboot:
+        msg: "Rebooting Machine, please check for Wi-Fi network {{wifi_network_name}}"
