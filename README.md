@@ -1,6 +1,6 @@
 # Captive Portal - Ansible
 
-Ansible playbook to install nodogsplash captive portal on a fresh raspbian install.
+Ansible playbook to install nodogsplash captive portal on a fresh raspbian install. This uses [Nodogsplash](https://github.com/nodogsplash/nodogsplash)
 
 ## Description
 
